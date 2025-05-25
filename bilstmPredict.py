@@ -61,8 +61,11 @@ class BiLSTMTagger(nn.Module):
         self.embedding = nn.Embedding(vocab_size, emb_dim)
         self.dropout = nn.Dropout(dropout)
 
-        if repr_type == 'b':
+        if repr_type in ['b', 'd']:
             self.char_embedder = CharBiLSTMEmbedder(char_vocab_size, 15, emb_dim // 2)
+
+        if repr_type == 'd':
+            self.combine_proj = nn.Linear(emb_dim + emb_dim, emb_dim)
 
         self.lstm1 = nn.LSTM(emb_dim, hidden_dim, num_layers=1, bidirectional=True, batch_first=True)
         self.lstm2 = nn.LSTM(2 * hidden_dim, hidden_dim, num_layers=1, bidirectional=True, batch_first=True)
@@ -71,12 +74,23 @@ class BiLSTMTagger(nn.Module):
     def forward(self, x, lengths, word_strs=None, char_to_ix=None):
         if self.repr_type == 'a':
             emb = self.embedding(x)
+
         elif self.repr_type == 'b':
             batch_reprs = []
             for sent in word_strs:
                 word_reprs = self.char_embedder(sent, char_to_ix)
                 batch_reprs.append(word_reprs)
             emb = nn.utils.rnn.pad_sequence(batch_reprs, batch_first=True)
+
+        elif self.repr_type == 'd':
+            emb_word = self.embedding(x)
+            batch_reprs = []
+            for sent in word_strs:
+                word_reprs = self.char_embedder(sent, char_to_ix)
+                batch_reprs.append(word_reprs)
+            emb_char = nn.utils.rnn.pad_sequence(batch_reprs, batch_first=True)
+            emb = torch.cat([emb_word, emb_char], dim=-1)
+            emb = self.combine_proj(emb)
 
         packed = nn.utils.rnn.pack_padded_sequence(emb, lengths, batch_first=True, enforce_sorted=False)
         out1, _ = self.lstm1(packed)
