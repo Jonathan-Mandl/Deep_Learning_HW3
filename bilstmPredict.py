@@ -55,7 +55,7 @@ class CharBiLSTMEmbedder(nn.Module):
         return torch.stack(reps)
 
 class BiLSTMTagger(nn.Module):
-    def __init__(self, vocab_size, tagset_size, char_vocab_size=None, repr_type='a', emb_dim=30, hidden_dim=50, dropout=0.3):
+    def __init__(self, vocab_size, tagset_size, char_vocab_size=None, repr_type='a', emb_dim=30, hidden_dim=50, dropout=0.3, prefix_size=None, suffix_size=None):
         super(BiLSTMTagger, self).__init__()
         self.repr_type = repr_type
         self.embedding = nn.Embedding(vocab_size, emb_dim)
@@ -67,11 +67,15 @@ class BiLSTMTagger(nn.Module):
         if repr_type == 'd':
             self.combine_proj = nn.Linear(emb_dim + emb_dim, emb_dim)
 
+        if repr_type == 'c':
+            self.prefix_embedding = nn.Embedding(prefix_size, emb_dim)
+            self.suffix_embedding = nn.Embedding(suffix_size, emb_dim)
+
         self.lstm1 = nn.LSTM(emb_dim, hidden_dim, num_layers=1, bidirectional=True, batch_first=True)
         self.lstm2 = nn.LSTM(2 * hidden_dim, hidden_dim, num_layers=1, bidirectional=True, batch_first=True)
         self.classifier = nn.Linear(2 * hidden_dim, tagset_size)
 
-    def forward(self, x, lengths, word_strs=None, char_to_ix=None):
+    def forward(self, x, lengths, word_strs=None, char_to_ix=None, prefix_to_ix=None, suffix_to_ix=None):
         if self.repr_type == 'a':
             emb = self.embedding(x)
 
@@ -92,6 +96,24 @@ class BiLSTMTagger(nn.Module):
             emb = torch.cat([emb_word, emb_char], dim=-1)
             emb = self.combine_proj(emb)
 
+        elif self.repr_type == 'c':
+            batch_reprs = []
+            for sent in word_strs:
+                reprs = []
+                for word in sent:
+                    word_ix = x[0][len(reprs)]
+                    pre = word[:3] if len(word) >= 3 else word
+                    suf = word[-3:] if len(word) >= 3 else word
+                    pre_ix = prefix_to_ix.get(pre, prefix_to_ix['<UNK>'])
+                    suf_ix = suffix_to_ix.get(suf, suffix_to_ix['<UNK>'])
+                    word_emb = self.embedding(word_ix)
+                    pre_emb = self.prefix_embedding(torch.tensor(pre_ix))
+                    suf_emb = self.suffix_embedding(torch.tensor(suf_ix))
+                    total = word_emb + pre_emb + suf_emb
+                    reprs.append(total)
+                batch_reprs.append(torch.stack(reprs))
+            emb = nn.utils.rnn.pad_sequence(batch_reprs, batch_first=True)
+
         packed = nn.utils.rnn.pack_padded_sequence(emb, lengths, batch_first=True, enforce_sorted=False)
         out1, _ = self.lstm1(packed)
         out1, _ = nn.utils.rnn.pad_packed_sequence(out1, batch_first=True)
@@ -110,12 +132,20 @@ def main():
     word_to_ix = checkpoint['word_to_ix']
     tag_to_ix = checkpoint['tag_to_ix']
     char_to_ix = checkpoint.get('char_to_ix', None)
+    prefix_to_ix = checkpoint.get('prefix_to_ix', None)
+    suffix_to_ix = checkpoint.get('suffix_to_ix', None)
     ix_to_tag = {v: k for k, v in tag_to_ix.items()}
 
     dataset = SequenceDatasetPredict(input_file, word_to_ix)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=pad_collate_predict)
 
-    model = BiLSTMTagger(len(word_to_ix), len(tag_to_ix), len(char_to_ix) if char_to_ix else None, repr_type)
+    model = BiLSTMTagger(
+        len(word_to_ix), len(tag_to_ix),
+        len(char_to_ix) if char_to_ix else None,
+        repr_type,
+        prefix_size=len(prefix_to_ix) if prefix_to_ix else None,
+        suffix_size=len(suffix_to_ix) if suffix_to_ix else None
+    )
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
@@ -124,7 +154,7 @@ def main():
             input_lines = original.readlines()
             sent_id = 0
             for inputs, lengths, word_strs in dataloader:
-                logits = model(inputs, lengths, word_strs, char_to_ix)
+                logits = model(inputs, lengths, word_strs, char_to_ix, prefix_to_ix, suffix_to_ix)
                 preds = torch.argmax(logits, dim=-1)[0][:lengths[0]]
                 for token_id in preds:
                     while not input_lines[sent_id].strip():
