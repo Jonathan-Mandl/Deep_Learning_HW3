@@ -150,7 +150,7 @@ def main():
     model.eval()
 
     with torch.no_grad():
-        with open(input_file) as original, open("predictions.txt", "w") as out:
+        with open(input_file) as original:
             input_lines = original.readlines()
             sent_id = 0
             for inputs, lengths, word_strs in dataloader:
@@ -158,14 +158,15 @@ def main():
                 preds = torch.argmax(logits, dim=-1)[0][:lengths[0]]
                 for token_id in preds:
                     while not input_lines[sent_id].strip():
-                        out.write("\n")
+                        print()
                         sent_id += 1
                     word = input_lines[sent_id].strip()
                     tag = ix_to_tag[token_id.item()]
-                    out.write(f"{word} {tag}\n")
+                    print(f"{word} {tag}")
                     sent_id += 1
-                out.write("\n")
+                print()
                 sent_id += 1
+
 
 if __name__ == '__main__':
     main()
